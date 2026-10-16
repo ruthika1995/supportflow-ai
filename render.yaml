@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: supportflow-ai
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: "cd frontend && npm install && npm run build && cd ../backend && pip install -r requirements.txt"
+    startCommand: "cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: NODE_VERSION
+        value: 20.12.0
+      - key: SECRET_KEY
+        generateValue: true
+      - key: PROJECT_NAME
+        value: "SupportFlow AI"
