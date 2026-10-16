@@ -13,7 +13,11 @@ class Settings(BaseSettings):
     # Database: Defaults to SQLite for instant local zero-config runs, or PostgreSQL (Neon/Supabase/Render)
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./supportflow.db")
     
-    # LLM Settings: Gemini API key
+    # LLM Settings: OpenRouter (Primary) or Gemini (Secondary)
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+    OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
     GEMINI_EMBED_MODEL: str = os.getenv("GEMINI_EMBED_MODEL", "models/text-embedding-004")

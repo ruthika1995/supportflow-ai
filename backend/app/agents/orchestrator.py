@@ -19,6 +19,7 @@ import json
 import re
 from typing import List, Dict, Any, Optional, Tuple
 from sqlalchemy.orm import Session
+import httpx
 import google.generativeai as genai
 from app.core.config import settings
 from app.tools.agent_tools import get_tool_definitions_for_llm, execute_tool
@@ -82,6 +83,20 @@ def _build_conversation_history(messages: List[Message]) -> List[Dict[str, str]]
             history.append({"role": "model", "parts": [msg.content]})
         elif msg.sender_type == "human_agent":
             history.append({"role": "model", "parts": [f"[Human Agent {msg.sender_name or ''}]: {msg.content}"]})
+    return history
+
+
+def _build_openrouter_history(system_prompt: str, messages: List[Message], current_message: str) -> List[Dict[str, str]]:
+    """Convert DB messages to OpenRouter / OpenAI chat format."""
+    history = [{"role": "system", "content": system_prompt}]
+    for msg in messages:
+        if msg.sender_type == "customer":
+            history.append({"role": "user", "content": msg.content})
+        elif msg.sender_type in ("ai_agent", "system"):
+            history.append({"role": "assistant", "content": msg.content})
+        elif msg.sender_type == "human_agent":
+            history.append({"role": "assistant", "content": f"[Human Agent {msg.sender_name or ''}]: {msg.content}"})
+    history.append({"role": "user", "content": current_message})
     return history
 
 
@@ -166,12 +181,72 @@ async def run_agent(
     approval_request_id = None
     final_response = ""
 
-    if not settings.GEMINI_API_KEY:
-        # Fallback when no API key — use a rule-based mock
-        final_response, all_tool_calls, requires_approval, approval_request_id = _mock_agent_response(
-            db, message, customer_id, ticket.id, conversation.id
-        )
-    else:
+    if settings.OPENROUTER_API_KEY:
+        try:
+            headers = {
+                "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
+                "HTTP-Referer": "https://supportflow-ai.onrender.com",
+                "X-Title": "SupportFlow AI",
+                "Content-Type": "application/json",
+            }
+            client_messages = _build_openrouter_history(system_prompt, all_messages[:-1], message)
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response_text = ""
+                for iteration in range(5):
+                    payload = {
+                        "model": settings.OPENROUTER_MODEL,
+                        "messages": client_messages,
+                        "temperature": 0.2,
+                    }
+                    resp = await client.post(
+                        f"{settings.OPENROUTER_BASE_URL}/chat/completions",
+                        headers=headers,
+                        json=payload,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    response_text = data["choices"][0]["message"]["content"]
+
+                    tool_calls = _extract_tool_calls(response_text)
+                    if not tool_calls:
+                        final_response = _strip_tool_calls(response_text)
+                        break
+
+                    tool_results = []
+                    for tc in tool_calls:
+                        tool_name = tc.get("tool", "")
+                        tool_args = tc.get("args", {})
+                        result = execute_tool(
+                            tool_name, tool_args, db,
+                            ticket_id=ticket.id,
+                            conversation_id=conversation.id,
+                        )
+                        all_tool_calls.append({
+                            "tool": tool_name,
+                            "args": tool_args,
+                            "result": result,
+                        })
+
+                        if result.get("requires_approval"):
+                            requires_approval = True
+                            approval_request_id = result.get("approval_request_id")
+
+                        tool_results.append(f"Tool '{tool_name}' result: {json.dumps(result)}")
+
+                    client_messages.append({"role": "assistant", "content": response_text})
+                    client_messages.append({
+                        "role": "user",
+                        "content": "Tool results:\n" + "\n".join(tool_results) + "\n\nNow respond to the customer based on these results."
+                    })
+                else:
+                    final_response = _strip_tool_calls(response_text) if response_text else "I apologize, I'm having trouble processing your request. Let me connect you with a human agent."
+        except Exception as e:
+            print(f"OpenRouter error: {e}, falling back to rule-based engine")
+            final_response, all_tool_calls, requires_approval, approval_request_id = _mock_agent_response(
+                db, message, customer_id, ticket.id, conversation.id
+            )
+    elif settings.GEMINI_API_KEY:
         genai.configure(api_key=settings.GEMINI_API_KEY)
         model = genai.GenerativeModel(
             settings.GEMINI_MODEL,
@@ -217,6 +292,11 @@ async def run_agent(
             current_message = "Tool results:\n" + "\n".join(tool_results) + "\n\nNow respond to the customer based on these results."
         else:
             final_response = _strip_tool_calls(response_text) if response_text else "I apologize, I'm having trouble processing your request. Let me connect you with a human agent."
+    else:
+        # Fallback when no API key — use a rule-based mock
+        final_response, all_tool_calls, requires_approval, approval_request_id = _mock_agent_response(
+            db, message, customer_id, ticket.id, conversation.id
+        )
 
     # 6. Save AI response
     ai_msg = Message(
