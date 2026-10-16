@@ -32,6 +32,10 @@ venv.bak/
 # Database
 *.sqlite
 *.sqlite3
+*.db
+*.db-*
+*.db-shm
+*.db-wal
 
 # Node / Frontend
 node_modules/
